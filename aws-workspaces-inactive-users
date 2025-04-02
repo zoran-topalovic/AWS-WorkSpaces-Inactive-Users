@@ -1,5 +1,10 @@
 #!/bin/bash
-# Includes all inactive users, even those who never logged in.
+# Description: This script will export all inactive users in past 60 days, even those who never logged in.
+# Developed by: Zoran Topalovic 
+# email: topalovic@gmail.com
+# Date: 20.02.2025
+
+
 
 # Define AWS regions
 AWS_REGIONS=("us-west-2" "eu-west-1" "ap-south-1") 
