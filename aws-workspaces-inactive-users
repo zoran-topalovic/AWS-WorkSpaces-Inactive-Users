@@ -1,0 +1,61 @@
+#!/bin/bash
+# Includes all inactive users, even those who never logged in.
+
+# Define AWS regions
+AWS_REGIONS=("us-west-2" "eu-west-1" "ap-south-1") 
+
+# Output file
+OUTPUT_FILE="aws_vdi_full_report.csv"
+
+# Initialize empty JSON arrays
+WORKSPACES_INFO="[]"
+CONNECTION_STATUS="[]"
+
+# Write CSV headers
+echo "UserName,ComputerName,OperatingSystemName,Region,ConnectionState,LastKnownUserConnectionTimestamp" > "$OUTPUT_FILE"
+
+# Loop through each region and fetch data
+for REGION in "${AWS_REGIONS[@]}"; do
+  echo "Fetching data for region: $REGION"
+
+  # Fetch detailed workspace information
+  REGION_WORKSPACES=$(aws workspaces describe-workspaces \
+    --query 'Workspaces[*].{WorkspaceId:WorkspaceId, UserName:UserName, ComputerName:ComputerName, BundleId:BundleId, ComputeTypeName:WorkspaceProperties.ComputeTypeName, OperatingSystemName:WorkspaceProperties.OperatingSystemName}' \
+    --region "$REGION" \
+    --output json 2>/dev/null || echo "[]")
+
+  # Validate JSON before adding
+  if jq -e . >/dev/null 2>&1 <<<"$REGION_WORKSPACES"; then
+    REGION_WORKSPACES=$(jq --arg region "$REGION" 'map(. + {Region: $region})' <<<"$REGION_WORKSPACES")
+    WORKSPACES_INFO=$(jq -c --argjson new_data "$REGION_WORKSPACES" '. + $new_data' <<<"$WORKSPACES_INFO")
+  fi
+
+  # Fetch connection status information
+  REGION_CONNECTION_STATUS=$(aws workspaces describe-workspaces-connection-status \
+    --query 'WorkspacesConnectionStatus[*]' \
+    --region "$REGION" \
+    --output json 2>/dev/null || echo "[]")
+
+  # Validate JSON before adding
+  if jq -e . >/dev/null 2>&1 <<<"$REGION_CONNECTION_STATUS"; then
+    CONNECTION_STATUS=$(jq -c --argjson new_data "$REGION_CONNECTION_STATUS" '. + $new_data' <<<"$CONNECTION_STATUS")
+  fi
+done
+
+# Merge both datasets, filter inactive users, and output to CSV
+echo "$WORKSPACES_INFO" | jq -r --argjson connectionStatus "$CONNECTION_STATUS" '
+  map(. as $workspace |
+      ($connectionStatus[]? | select(.WorkspaceId == $workspace.WorkspaceId)) as $conn |
+      if $conn.LastKnownUserConnectionTimestamp then
+        ($conn.LastKnownUserConnectionTimestamp | sub("\\.[0-9]+"; "") | sub("[+-][0-9]{2}:[0-9]{2}$"; "Z") | fromdate) as $timestamp |
+        if (now - $timestamp) > (60 * 86400) then
+          $workspace + {ConnectionState: $conn.ConnectionState, LastKnownUserConnectionTimestamp: $conn.LastKnownUserConnectionTimestamp}
+        else empty end
+      else
+        $workspace + {ConnectionState: $conn.ConnectionState, LastKnownUserConnectionTimestamp: null}
+      end) |
+  map([.UserName, .ComputerName, .OperatingSystemName, .Region, .ConnectionState, .LastKnownUserConnectionTimestamp] | @csv) |
+  .[]' >> "$OUTPUT_FILE"
+
+echo "CSV export completed: $OUTPUT_FILE"
+
